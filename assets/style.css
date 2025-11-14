@@ -7,6 +7,8 @@ form.inline{display:inline-block;margin-right:8px;margin-bottom:12px}
 .muted{color:#666}
 .key{font-family:ui-monospace,Consolas,Monaco,monospace;word-break:break-all}
 .toolbar{padding:10px;background:#f2f2f2;border-bottom:1px solid #ddd;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.app-title{font-weight:600;font-size:18px;color:#222;text-decoration:none}
+.app-title:hover{text-decoration:underline}
 .btn{display:inline-block;padding:6px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#222;text-decoration:none;cursor:pointer}
 .btn:hover{background:#f6f6f6}
 .btn-danger{border-color:#d33;background:#fef2f2;color:#a00}

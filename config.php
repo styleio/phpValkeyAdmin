@@ -14,8 +14,15 @@ return [
             'timeout' => 1.5,
             // 'tls'   => false, // not supported in socket fallback; phpredis may use tls via scheme
         ],
-        // Add more servers as needed
-        // [ 'name' => 'Prod', 'host' => '10.0.0.10', 'port' => 6379, 'password' => '***', 'database' => 0 ],
+        // Add more servers as needed(AWS Sample)
+        // [
+        //     'name'    => 'AWS Valkey',
+        //     'host'    => 'tls://XXXXX.serverless.apne1.cache.amazonaws.com', //AWS prepends tls: to the beginning.
+        //     'port'    => 6379,
+        //     'database' => 0, //In AWS, selecting anything other than 0 will result in an error.
+        //     'timeout' => 5.0,
+        //     'tls'   => true,
+        // ],
     ],
     // UI and behavior
     'page_size'   => 100,   // keys per page when scanning

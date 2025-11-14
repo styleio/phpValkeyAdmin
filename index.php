@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 // Load configuration
 $CONFIG = require __DIR__ . '/config.php';
+if (!headers_sent()) {
+    header('Content-Type: text/html; charset=UTF-8');
+}
 
 // Utilities
 function h($s): string { $flags = ENT_QUOTES; if (defined('ENT_SUBSTITUTE')) { $flags |= ENT_SUBSTITUTE; } return htmlspecialchars((string)$s, $flags, 'UTF-8'); }
@@ -10,9 +13,43 @@ function v($arr, $key, $def = null) { return array_key_exists($key, $arr) ? $arr
 
 // CSRF
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
-if (empty($_SESSION['csrf'])) { $_SESSION['csrf'] = bin2hex(random_bytes(16)); }
-function csrf_input(): string { return '<input type="hidden" name="csrf" value="' . h($_SESSION['csrf']) . '">'; }
-function csrf_check(): void { if ($_SERVER['REQUEST_METHOD'] === 'POST') { $ok = isset($_POST['csrf']) && hash_equals($_SESSION['csrf'] ?? '', (string)$_POST['csrf']); if (!$ok) { http_response_code(400); echo 'Invalid CSRF token'; exit; } } }
+$GLOBALS['CSRF_COOKIE_VALUE'] = '';
+if (!empty($_COOKIE['csrf']) && is_string($_COOKIE['csrf'])) {
+    $candidate = (string)$_COOKIE['csrf'];
+    if (preg_match('/^[a-f0-9]{32}$/i', $candidate)) {
+        $GLOBALS['CSRF_COOKIE_VALUE'] = $candidate;
+    }
+}
+if (empty($_SESSION['csrf']) || !is_string($_SESSION['csrf']) || $_SESSION['csrf'] === '') {
+    $_SESSION['csrf'] = $GLOBALS['CSRF_COOKIE_VALUE'] !== '' ? $GLOBALS['CSRF_COOKIE_VALUE'] : bin2hex(random_bytes(16));
+}
+function csrf_token(): string { return (string)($_SESSION['csrf'] ?? ''); }
+function csrf_cookie_value(): string { return (string)($GLOBALS['CSRF_COOKIE_VALUE'] ?? ''); }
+function csrf_input(): string { return '<input type="hidden" name="csrf" value="' . h(csrf_token()) . '">'; }
+function csrf_check(): void {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $token = (string)($_POST['csrf'] ?? '');
+        $sessionToken = $_SESSION['csrf'] ?? '';
+        $cookieToken = csrf_cookie_value();
+        $valid = false;
+        if ($token !== '') {
+            if (is_string($sessionToken) && $sessionToken !== '' && hash_equals($sessionToken, $token)) {
+                $valid = true;
+            } elseif (is_string($cookieToken) && $cookieToken !== '' && hash_equals($cookieToken, $token)) {
+                $valid = true;
+            }
+        }
+        if (!$valid) { http_response_code(400); echo 'Invalid CSRF token'; exit; }
+    }
+}
+function csrf_ensure_cookie(): void {
+    $token = csrf_token();
+    $cookieToken = csrf_cookie_value();
+    if ($token !== '' && $token !== $cookieToken && !headers_sent()) {
+        setcookie('csrf', $token, time()+31536000, '/', '', isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off', true);
+        $GLOBALS['CSRF_COOKIE_VALUE'] = $token;
+    }
+}
 
 // i18n loader (languages/*.php)
 function load_languages(string $dir): array { $packs = []; if (!is_dir($dir)) return $packs; foreach (scandir($dir) as $f) { if ($f === '.' || $f === '..') continue; if (substr($f, -4) !== '.php') continue; $code = basename($f, '.php'); $arr = @include $dir . DIRECTORY_SEPARATOR . $f; if (is_array($arr)) $packs[$code] = $arr; } return $packs; }
@@ -21,6 +58,42 @@ function t(string $k): string { global $I18N, $LANG; return $I18N[$LANG][$k] ?? 
 function ui_label(string $emoji, string $key): string { return $emoji . ' ' . t($key); }
 function pretty_type_ui(string $type): string { $emap = [ 'string'=>'🔤', 'hash'=>'#️⃣', 'list'=>'📜', 'set'=>'🧩', 'zset'=>'🔢', 'none'=>'∅' ]; $emoji = $emap[$type] ?? ''; $labelKey = 'type_'.$type; $text = t($labelKey); if ($text === $labelKey) $text = $type; return trim($emoji.' '.$text); }
 function format_ttl2(int $ttl): string { global $LANG; if ($ttl === -1) return '♾️ ' . t('permanent'); if ($ttl === -2) return t('not_available'); $s = max(0, $ttl); $d = intdiv($s, 86400); $s %= 86400; $h = intdiv($s, 3600); $s %= 3600; $m = intdiv($s, 60); $s %= 60; $parts = []; if ($LANG === 'ja') { if ($d) $parts[] = $d.'日'; if ($h) $parts[] = $h.'時'; if ($m) $parts[] = $m.'分'; if ($s || !$parts) $parts[] = $s.'秒'; } else { if ($d) $parts[] = $d.'d'; if ($h) $parts[] = $h.'h'; if ($m) $parts[] = $m.'m'; if ($s || !$parts) $parts[] = $s.'s'; } return '⏳ '.implode(' ', $parts); }
+
+// Value preview helpers
+function value_looks_binary(string $value): bool {
+    if ($value === '') {
+        return false;
+    }
+    if (preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $value)) {
+        return true;
+    }
+    if (function_exists('mb_detect_encoding')) {
+        return !mb_detect_encoding($value, 'UTF-8', true);
+    }
+    return !preg_match('//u', $value);
+}
+function build_value_preview(string $value, int $limit = 120): array {
+    $isBinary = value_looks_binary($value);
+    if ($isBinary) {
+        return [
+            'text' => t('binary_value').' ('.number_format(strlen($value)).' '.t('bytes_unit').')',
+            'binary' => true,
+        ];
+    }
+    $text = $value;
+    if ($limit > 0) {
+        if (function_exists('mb_strlen') && function_exists('mb_substr')) {
+            if (mb_strlen($text, 'UTF-8') > $limit) {
+                $text = mb_substr($text, 0, $limit, 'UTF-8').'…';
+            }
+        } else {
+            if (strlen($text) > $limit) {
+                $text = substr($text, 0, $limit).'…';
+            }
+        }
+    }
+    return ['text' => $text, 'binary' => false];
+}
 
 // Minimal Redis client
 class MiniRedis {
@@ -60,12 +133,12 @@ class MiniRedis {
 // Routing and i18n setup
 $serverIndex=(int)($_GET['server']??0); $servers=$CONFIG['servers']??[]; if(!isset($servers[$serverIndex])) $serverIndex=0; $server=$servers[$serverIndex];
 $db=isset($_GET['db'])?(int)$_GET['db']:(int)($server['database']??0); $pattern=$_GET['pattern']??'*'; $pageSize=(int)($CONFIG['page_size']??100); $scanCount=(int)($CONFIG['scan_count']??max(50,$pageSize)); $cursor=$_GET['cursor']??'0';
-$langDir=$CONFIG['languages_path'] ?? (__DIR__.'/languages'); $I18N=load_languages($langDir); if (empty($I18N['en'])) { $I18N['en']=['name'=>'English','app_title'=>'phpValkeyAdmin','server'=>'Server','db'=>'DB','switch'=>'Switch','keys'=>'Keys','create'=>'Create','info'=>'Info','search_pattern'=>'Search pattern','search'=>'Search','flushdb'=>'FLUSHDB','confirm_flushdb'=>'Are you sure to FLUSHDB?','table_key'=>'Key','table_type'=>'Type','table_ttl'=>'TTL','table_actions'=>'Actions','view'=>'View','delete'=>'Delete','confirm_delete'=>'Delete this key?','next_page'=>'Next','end_results'=>'End of results','type_label'=>'Type','ttl_label'=>'TTL','rename'=>'Rename','set_ttl'=>'Set TTL','save'=>'Save','add_update_field'=>'Add/Update Field','field'=>'Field','value'=>'Value','items_first'=>'Items (first 200)','append_item'=>'Append item','members'=>'Members','add_member'=>'Add member','member'=>'Member','score'=>'Score','unsupported'=>'Unsupported or empty type','create_key'=>'Create Key','initial_value'=>'Initial Value','server_info'=>'Server Info','dbsize'=>'dbsize','last_page'=>'Last page reached','language'=>'Language','permanent'=>'Permanent','not_available'=>'N/A','type_string'=>'string','type_hash'=>'hash','type_list'=>'list','type_set'=>'set','type_zset'=>'zset','type_none'=>'none']; }
+$langDir=$CONFIG['languages_path'] ?? (__DIR__.'/languages'); $I18N=load_languages($langDir); if (empty($I18N['en'])) { $I18N['en']=['name'=>'English','app_title'=>'phpValkeyAdmin','server'=>'Server','db_input_label'=>'Database','switch'=>'Switch','keys'=>'Keys','create'=>'Create','info'=>'Info','search_pattern'=>'Search pattern','search'=>'Search','flushdb'=>'FLUSHDB','confirm_flushdb'=>'Are you sure to FLUSHDB?','table_key'=>'Key','table_type'=>'Type','table_value_preview'=>'Value preview','table_ttl'=>'TTL','table_actions'=>'Actions','view'=>'View','delete'=>'Delete','confirm_delete'=>'Delete this key?','next_page'=>'Next','end_results'=>'End of results','type_label'=>'Type','ttl_label'=>'TTL','rename'=>'Rename','set_ttl'=>'Set TTL','save'=>'Save','add_update_field'=>'Add/Update Field','field'=>'Field','value'=>'Value','items_first'=>'Items (first 200)','append_item'=>'Append item','members'=>'Members','add_member'=>'Add member','member'=>'Member','score'=>'Score','unsupported'=>'Unsupported or empty type','create_key'=>'Create Key','initial_value'=>'Initial Value','server_info'=>'Server Info','dbsize'=>'dbsize','last_page'=>'Last page reached','language'=>'Language','permanent'=>'Permanent','not_available'=>'N/A','type_string'=>'string','type_hash'=>'hash','type_list'=>'list','type_set'=>'set','type_zset'=>'zset','type_none'=>'none','binary_value'=>'Binary data','bytes_unit'=>'bytes']; }
 $defaultLang=$CONFIG['default_language']??'en'; $LANG=detect_lang($I18N, isset($I18N[$defaultLang])?$defaultLang:'en');
 
 // Connect
 $r=new MiniRedis(array_merge($server,['database'=>$db])); try { $r->connect(); } catch (Throwable $e) { http_response_code(500); echo '<h1>Connection error</h1><pre>'.h($e->getMessage()).'</pre>'; exit; }
-csrf_check(); $action=$_GET['action']??'list';
+csrf_check(); csrf_ensure_cookie(); $action=$_GET['action']??'list';
 function redirect(string $url): void { header('Location: '.$url); exit; }
 function baseUrl(array $params=[]): string { $q=array_merge(['server'=>$_GET['server']??0,'db'=>$_GET['db']??0,'lang'=>$_GET['lang']??($GLOBALS['LANG']??'en')],$params); return '?'.http_build_query($q); }
 
@@ -90,14 +163,14 @@ try {
 } catch (Throwable $e) { http_response_code(500); echo '<h1>Error</h1><pre>'.h($e->getMessage()).'</pre>'; $r->close(); exit; }
 
 // Header
-function headerNav(array $servers,int $serverIndex,int $db): void { echo '<div class="toolbar">'; echo '<strong>'.h(t('app_title')).'</strong>'; echo '<form method="get" style="display:inline;margin:0">'; echo ' 🖥️ '.h(t('server')).': <select name="server" onchange="this.form.submit()">'; foreach($servers as $i=>$s){ $sel=$i===$serverIndex?' selected':''; echo '<option value="'.h((string)$i).'"'.$sel.'>'.h($s['name'] ?? ($s['host'].':'.$s['port'])).'</option>'; } echo '</select>'; echo ' 🗄️ '.h(t('db')).': <input type="number" name="db" value="'.h($db).'" min="0" max="1024" style="width:64px">'; echo ' <button class="btn btn-small" type="submit">'.h(t('switch')).'</button>'; echo '</form>'; echo ' <a class="btn btn-small" href="'.h(baseUrl()).'">'.h(ui_label('🗝️','keys')).'</a>'; echo ' <a class="btn btn-small" href="'.h(baseUrl(['action'=>'create'])).'">'.h(ui_label('➕','create')).'</a>'; echo ' <a class="btn btn-small" href="'.h(baseUrl(['action'=>'info'])).'">'.h(ui_label('ℹ️','info')).'</a>'; echo ' <span class="muted">🌐 '.h(t('language')).':</span> '; $packs=$GLOBALS['I18N'] ?? []; $current=$GLOBALS['LANG'] ?? 'en'; foreach($packs as $code=>$pack){ $active=($code===$current); $label=$pack['name'] ?? strtoupper($code); echo '<a class="btn btn-small'.($active?' btn-secondary':'').'" href="'.h(baseUrl(['lang'=>$code])).'">'.h($label).'</a> '; } echo '</div>'; }
+function headerNav(array $servers,int $serverIndex,int $db): void { echo '<div class="toolbar">'; echo '<a class="app-title" href="'.h(baseUrl()).'">'.h(t('app_title')).'</a>'; echo '<form method="get" style="display:inline;margin:0">'; echo ' 🖥️ '.h(t('server')).': <select name="server" onchange="this.form.submit()">'; foreach($servers as $i=>$s){ $sel=$i===$serverIndex?' selected':''; echo '<option value="'.h((string)$i).'"'.$sel.'>'.h($s['name'] ?? ($s['host'].':'.$s['port'])).'</option>'; } echo '</select>'; echo ' 🗄️ '.h(t('db_input_label')).': <input type="number" name="db" value="'.h($db).'" min="0" max="1024" style="width:64px">'; echo ' <button class="btn btn-small" type="submit">'.h(t('switch')).'</button>'; echo '</form>'; echo ' <a class="btn btn-small" href="'.h(baseUrl(['action'=>'create'])).'">'.h(ui_label('➕','create')).'</a>'; echo ' <a class="btn btn-small" href="'.h(baseUrl(['action'=>'info'])).'">'.h(ui_label('ℹ️','info')).'</a>'; echo ' <span class="muted">🌐 '.h(t('language')).':</span> '; $packs=$GLOBALS['I18N'] ?? []; $current=$GLOBALS['LANG'] ?? 'en'; foreach($packs as $code=>$pack){ $active=($code===$current); $label=$pack['name'] ?? strtoupper($code); echo '<a class="btn btn-small'.($active?' btn-secondary':'').'" href="'.h(baseUrl(['lang'=>$code])).'">'.h($label).'</a> '; } echo '</div>'; }
 function footerNote(){ echo '<div style="padding:10px;color:#888;font-size:12px;border-top:1px solid #eee;margin-top:20px">Powered by phpValkeyAdmin</div>'; }
 
 // Render
 echo '<!doctype html><html><head><meta charset="utf-8"><title>phpValkeyAdmin</title>'; echo '<meta name="viewport" content="width=device-width, initial-scale=1">'; echo '<link rel="stylesheet" href="assets/style.css">'; echo '<script src="assets/app.js" defer></script>'; echo '</head><body>';
 headerNav($servers,$serverIndex,$db);
 
-if ($action === 'list') { $pattern=$_GET['pattern']??'*'; echo '<div style="padding:10px">'; echo '<form method="get" style="margin-bottom:10px">'; echo '<input type="hidden" name="server" value="'.h((string)$serverIndex).'">'; echo '<input type="hidden" name="db" value="'.h((string)$db).'">'; echo '🔍 '.h(t('search_pattern')).': <input type="text" name="pattern" value="'.h($pattern).'" placeholder="user:*" style="width:320px"> '; echo '<button class="btn" type="submit">'.h(t('search')).'</button> '; echo '</form>'; if (!empty($CONFIG['allow_flush'])) { echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'flushdb'])).'" onsubmit="return confirm(\''.h(t('confirm_flushdb')).'\')">'.csrf_input().'<button class="btn btn-danger" type="submit">🧹 '.h(t('flushdb')).'</button></form>'; } $cursor=$_GET['cursor']??'0'; try{ [$nextCursor,$keys]=$r->scan($cursor,$pattern,$scanCount);}catch(Throwable $e){ $nextCursor='0'; $keys=[]; echo '<div class="muted">SCAN error: '.h($e->getMessage()).'</div>'; } echo '<table><tr><th>🔑 '.h(t('table_key')).'</th><th>📦 '.h(t('table_type')).'</th><th>⏱️ '.h(t('table_ttl')).'</th><th>⚙️ '.h(t('table_actions')).'</th></tr>'; foreach($keys as $k){ try{$tpe=$r->type($k);}catch(Throwable $e){$tpe='?';} try{$ttl=$r->ttl($k);}catch(Throwable $e){$ttl=-2;} $ttlStr=format_ttl2($ttl); echo '<tr>'; echo '<td class="key">'.h($k).'</td>'; echo '<td><span class="badge">'.h(pretty_type_ui($tpe)).'</span></td>'; echo '<td>'.h($ttlStr).'</td>'; echo '<td>'; echo '<a class="btn btn-small" href="'.h(baseUrl(['action'=>'view','key'=>$k])).'">'.h(ui_label('👁️','view')).'</a> '; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'delete'])).'" onsubmit="return confirm(\''.h(t('confirm_delete')).'\')">'.csrf_input().'<input type="hidden" name="key" value="'.h($k).'"><button class="btn btn-danger btn-small" type="submit">'.h(ui_label('🗑️','delete')).'</button></form>'; echo '</td>'; echo '</tr>'; } echo '</table>'; echo '<div style="margin-top:8px">'; if(!empty($nextCursor) && $nextCursor!=='0'){ echo '<a class="btn btn-small" href="'.h(baseUrl(['pattern'=>$pattern,'cursor'=>$nextCursor])).'">'.h(ui_label('▶️','next_page')).'</a>'; } else { echo '<span class="muted">'.h(t('end_results')).'</span>'; } echo '</div>'; echo '</div>'; }
+if ($action === 'list') { $pattern=$_GET['pattern']??'*'; echo '<div style="padding:10px">'; echo '<form method="get" style="margin-bottom:10px">'; echo '<input type="hidden" name="server" value="'.h((string)$serverIndex).'">'; echo '<input type="hidden" name="db" value="'.h((string)$db).'">'; echo '🔍 '.h(t('search_pattern')).': <input type="text" name="pattern" value="'.h($pattern).'" placeholder="user:*" style="width:320px"> '; echo '<button class="btn" type="submit">'.h(t('search')).'</button> '; echo '</form>'; if (!empty($CONFIG['allow_flush'])) { echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'flushdb'])).'" onsubmit="return confirm(\''.h(t('confirm_flushdb')).'\')">'.csrf_input().'<button class="btn btn-danger" type="submit">🧹 '.h(t('flushdb')).'</button></form>'; } $cursor=$_GET['cursor']??'0'; try{ [$nextCursor,$keys]=$r->scan($cursor,$pattern,$scanCount);}catch(Throwable $e){ $nextCursor='0'; $keys=[]; echo '<div class="muted">SCAN error: '.h($e->getMessage()).'</div>'; } echo '<table><tr><th>🔑 '.h(t('table_key')).'</th><th>📦 '.h(t('table_type')).'</th><th>📝 '.h(t('table_value_preview')).'</th><th>⏱️ '.h(t('table_ttl')).'</th><th>⚙️ '.h(t('table_actions')).'</th></tr>'; foreach($keys as $k){ try{$tpe=$r->type($k);}catch(Throwable $e){$tpe='?';} try{$ttl=$r->ttl($k);}catch(Throwable $e){$ttl=-2;} $ttlStr=format_ttl2($ttl); $previewHtml='<span class="muted">'.h(t('not_available')).'</span>'; if($tpe==='string'){ try{ $raw=$r->get($k); if($raw!==null){ $preview=build_value_preview((string)$raw,160); if($preview['binary']){ $previewHtml='<span class="muted">'.h($preview['text']).'</span>'; } else { $previewHtml='<code style="white-space:pre-wrap">'.h($preview['text']).'</code>'; } } }catch(Throwable $e){ $previewHtml='<span class="muted">⚠️</span>'; } } echo '<tr>'; echo '<td class="key">'.h($k).'</td>'; echo '<td><span class="badge">'.h(pretty_type_ui($tpe)).'</span></td>'; echo '<td>'.$previewHtml.'</td>'; echo '<td>'.h($ttlStr).'</td>'; echo '<td>'; echo '<a class="btn btn-small" href="'.h(baseUrl(['action'=>'view','key'=>$k])).'">'.h(ui_label('👁️','view')).'</a> '; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'delete'])).'" onsubmit="return confirm(\''.h(t('confirm_delete')).'\')">'.csrf_input().'<input type="hidden" name="key" value="'.h($k).'"><button class="btn btn-danger btn-small" type="submit">'.h(ui_label('🗑️','delete')).'</button></form>'; echo '</td>'; echo '</tr>'; } echo '</table>'; echo '<div style="margin-top:8px">'; if(!empty($nextCursor) && $nextCursor!=='0'){ echo '<a class="btn btn-small" href="'.h(baseUrl(['pattern'=>$pattern,'cursor'=>$nextCursor])).'">'.h(ui_label('▶️','next_page')).'</a>'; } else { echo '<span class="muted">'.h(t('end_results')).'</span>'; } echo '</div>'; echo '</div>'; }
 
 if ($action === 'view') { $key=(string)($_GET['key']??''); echo '<div style="padding:10px">'; echo '<h2 class="key">'.h($key).'</h2>'; try{$type=$r->type($key);}catch(Throwable $e){$type='?';} try{$ttl=$r->ttl($key);}catch(Throwable $e){$ttl=-2;} $ttlStr=format_ttl2($ttl); echo '<div class="muted">📦 '.h(t('type_label')).': <span class="badge">'.h(pretty_type_ui($type)).'</span> | ⏱️ '.h(t('ttl_label')).': '.h($ttlStr).'</div>'; echo '<div style="margin:10px 0">'; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'rename'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'"><input type="text" name="new" value="'.h($key).'" style="width:300px"> <button class="btn btn-small" type="submit">'.h(ui_label('✏️','rename')).'</button></form> '; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'expire'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'"><input type="number" name="ttl" placeholder="'.h(($LANG==='ja')?'秒 (0 で永続)':'seconds (0=persist)').'" style="width:160px"> <button class="btn btn-small" type="submit">'.h(ui_label('⏱️','set_ttl')).'</button></form> '; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'delete'])).'" onsubmit="return confirm(\''.h(t('confirm_delete')).'\')">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'"><button class="btn btn-danger btn-small" type="submit">'.h(ui_label('🗑️','delete')).'</button></form>'; echo '</div>'; if($type==='string'){ $val=(string)($r->get($key)??''); echo '<form method="post" action="'.h(baseUrl(['action'=>'set-string'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'">'; echo '<textarea name="value" rows="10" style="font-family:monospace">'.h($val).'</textarea><br>'; echo '<button class="btn" type="submit">'.h(ui_label('💾','save')).'</button>'; echo '</form>'; } elseif($type==='hash'){ $fields=$r->hgetall($key); echo '<table><tr><th>🏷️ '.h(t('field')).'</th><th>📄 '.h(t('value')).'</th><th>⚙️ '.h(t('table_actions')).'</th></tr>'; foreach($fields as $f=>$v){ echo '<tr><td class="key">'.h($f).'</td><td><pre style="white-space:pre-wrap;margin:0">'.h($v).'</pre></td><td>'; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'hdel'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'"><input type="hidden" name="field" value="'.h($f).'"><button class="btn btn-danger btn-small" type="submit">'.h(ui_label('🗑️','delete')).'</button></form>'; echo '</td></tr>'; } echo '</table>'; echo '<h3>➕ '.h(t('add_update_field')).'</h3>'; echo '<form method="post" action="'.h(baseUrl(['action'=>'hset'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'">'; echo h(t('field')).' <input type="text" name="field" style="width:200px"> '.h(t('value')).' <input type="text" name="value" style="width:400px"> <button class="btn" type="submit">'.h(ui_label('💾','save')).'</button>'; echo '</form>'; } elseif($type==='list'){ $items=$r->lrange($key,0,200); echo '<h3>📜 '.h(t('items_first')).'</h3><ul>'; foreach($items as $v){ echo '<li><code>'.h($v).'</code> '; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'list-rem'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'"><input type="hidden" name="value" value="'.h($v).'"><button class="btn btn-danger btn-small" type="submit">'.h(ui_label('🗑️','delete')).'</button></form>'; echo '</li>'; } echo '</ul>'; echo '<h3>➕ '.h(t('append_item')).'</h3>'; echo '<form method="post" action="'.h(baseUrl(['action'=>'list-add'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'">'; echo '<input type="text" name="value" style="width:400px"> <button class="btn" type="submit">'.h(ui_label('➡️','button_rpush')).'</button>'; echo '</form>'; } elseif($type==='set'){ $members=$r->smembers($key); sort($members,SORT_STRING); echo '<h3>🧩 '.h(t('members')).'</h3><ul>'; foreach($members as $m){ echo '<li><code>'.h($m).'</code> '; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'set-rem'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'"><input type="hidden" name="value" value="'.h($m).'"><button class="btn btn-danger btn-small" type="submit">'.h(ui_label('🗑️','delete')).'</button></form>'; echo '</li>'; } echo '</ul>'; echo '<h3>➕ '.h(t('add_member')).'</h3>'; echo '<form method="post" action="'.h(baseUrl(['action'=>'set-add'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'">'; echo '<input type="text" name="value" style="width:400px"> <button class="btn" type="submit">'.h(ui_label('➕','button_sadd')).'</button>'; echo '</form>'; } elseif($type==='zset'){ $pairs=$r->zrangeWithScores($key,0,200); echo '<h3>🧮 '.h(t('members')).' (first 200)</h3>'; echo '<table><tr><th>'.h(t('member')).'</th><th>'.h(t('score')).'</th><th>'.h(t('table_actions')).'</th></tr>'; foreach($pairs as $member=>$score){ echo '<tr><td><code>'.h($member).'</code></td><td>'.h((string)$score).'</td><td>'; echo '<form class="inline" method="post" action="'.h(baseUrl(['action'=>'zrem'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'"><input type="hidden" name="member" value="'.h($member).'"><button class="btn btn-danger btn-small" type="submit">'.h(ui_label('🗑️','delete')).'</button></form>'; echo '</td></tr>'; } echo '</table>'; echo '<h3>➕ '.h(t('add_member')).'</h3>'; echo '<form method="post" action="'.h(baseUrl(['action'=>'zadd'])).'">'.csrf_input().'<input type="hidden" name="key" value="'.h($key).'">'; echo h(t('member')).' <input type="text" name="member" style="width:300px"> '.h(t('score')).' <input type="number" step="any" name="score" value="0" style="width:120px"> <button class="btn" type="submit">'.h(ui_label('➕','button_zadd')).'</button>'; echo '</form>'; } else { echo '<div class="muted">'.h(t('unsupported')).': '.h($type).'</div>'; } echo '</div>'; }
 

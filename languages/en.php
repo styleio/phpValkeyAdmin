@@ -3,7 +3,7 @@ return [
     'name' => 'English',
     'app_title' => 'phpValkeyAdmin',
     'server' => 'Server',
-    'db' => 'DB',
+    'db_input_label' => 'Database',
     'switch' => 'Switch',
     'keys' => 'Keys',
     'create' => 'Create',
@@ -14,6 +14,7 @@ return [
     'confirm_flushdb' => 'Are you sure to FLUSHDB?',
     'table_key' => 'Key',
     'table_type' => 'Type',
+    'table_value_preview' => 'Value preview',
     'table_ttl' => 'TTL',
     'table_actions' => 'Actions',
     'view' => 'View',
@@ -63,4 +64,6 @@ return [
     'type_set' => 'set',
     'type_zset' => 'zset',
     'type_none' => 'none',
+    'binary_value' => 'Binary data',
+    'bytes_unit' => 'bytes',
 ];

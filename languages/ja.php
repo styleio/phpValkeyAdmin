@@ -3,7 +3,7 @@ return [
     'name' => '日本語',
     'app_title' => 'phpValkeyAdmin',
     'server' => 'サーバー',
-    'db' => 'DB',
+    'db_input_label' => 'データベース番号',
     'switch' => '切り替え',
     'keys' => 'キー一覧',
     'create' => '作成',
@@ -14,6 +14,7 @@ return [
     'confirm_flushdb' => '本当に FLUSHDB しますか？',
     'table_key' => 'Key',
     'table_type' => 'Type',
+    'table_value_preview' => '値プレビュー',
     'table_ttl' => 'TTL',
     'table_actions' => '操作',
     'view' => '表示',
@@ -63,4 +64,6 @@ return [
     'type_set' => 'set',
     'type_zset' => 'zset',
     'type_none' => 'none',
+    'binary_value' => 'バイナリデータ',
+    'bytes_unit' => 'バイト',
 ];
